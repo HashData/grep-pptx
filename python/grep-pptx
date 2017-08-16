@@ -1,0 +1,103 @@
+#!/usr/bin/env python
+
+#############################################################################################################################
+# A command line utility to search text within powerpoint presentations of format pptx
+# Outputs zero or more lines with file name, slide number, and the matched text snippet
+# Most functionality, including color output on terminal emulator is similar to grep
+# Limitations:
+#     Color output will likely not work on terminals on Windows operating systems, and the color codes will be displayed
+#############################################################################################################################
+
+import re
+import argparse
+import zipfile
+import os
+import sys
+import mimetypes
+
+if __name__ == '__main__':
+
+    # Terminal color codes
+    RESET = '\x1b[0m'
+    RED_BOLD = '\x1b[01;31m'
+    GREEN = '\x1b[32m'
+    MAGENTA = '\x1b[35m'
+    CYAN = '\x1b[36m'
+
+    # Parse options and arguments
+    parser = argparse.ArgumentParser(usage = 'grep-pptx [OPTION]... PATTERN FILE...',
+                                     description = 'Search each FILE (of format pptx) for lines containing a match to PATTERN.\n' + \
+                                                   'Default output is the matching lines with the file name, slide number, and matched text snippet.\n' + \
+                                                   "Example: grep-pptx -iP 'foo.*bar' presentation.pptx")
+    parser.add_argument('PATTERN', help = 'String pattern to be searched.')
+    parser.add_argument('FILE', help = 'Powerpoint pptx file.', nargs = '+')
+    parser.add_argument('-P', '--python-regexp', help = 'Interpret PATTERN as a Python regular expression.', action = 'store_true')
+    parser.add_argument('-F', '--fixed-string', help = 'Interpret PATTERN as a string literal (default).', action = 'store_true', default = True)
+    parser.add_argument('-i', '--ignore-case', help = 'Ignore case distinctions in PATTERN.', action = 'store_true')
+    parser.add_argument('-r', '--recursive', help = 'Read all pptx files under each directory, recursively.', action = 'store_true')
+    parser.add_argument('-s', '--no-messages', help = 'Suppress error and warning messages about nonexistent files, unreadable files, and files in an unsupported format.', action = 'store_true')
+    args = parser.parse_args()
+
+    # List of files to search
+    if args.recursive:
+        pptx_mimetype = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        pptx_file_list = [os.path.join(dirpath, f) for dirname in args.FILE for dirpath,dirnames,filenames in os.walk(dirname) for f in filenames if mimetypes.MimeTypes().guess_type(f)[0] == pptx_mimetype]
+
+        # add file type FILE arguments
+        pptx_file_list.extend([f for f in args.FILE if os.path.isfile(f)])
+    else:
+        pptx_file_list = args.FILE
+
+    # Search each FILE for PATTERN one by one
+    for pptx_file in pptx_file_list:
+
+        # Check if filepath is valid
+        if not os.path.exists(pptx_file):
+            if not args.no_messages:
+                sys.stderr.write('ERROR: Cannot access file path: ' + pptx_file + '\n')
+            continue
+
+        # Ensure filepath is not a directory, which is only OK if --recursive has been called
+        if os.path.isdir(pptx_file):
+            if not args.no_messages:
+                sys.stderr.write('WARNING: ' + pptx_file + ': Is a directory\n')
+            continue
+
+        # Check if file can be unzipped
+        try:
+            unzipped_content = zipfile.ZipFile(file(pptx_file, 'rb'))
+        except Exception as e:
+            if not args.no_messages:
+                sys.stderr.write('WARNING: Failed to unzip. Is this the correct format?: ' + pptx_file + '\n')
+            continue
+
+        # Retrieve all names of slides in /slides/ directory
+        slide_names_list = [slide for slide in unzipped_content.namelist() if re.search('.*/slides/slide\d+\.xml', slide)]
+
+        # Sort the slides name list numerically
+        slide_names_list_sorted = sorted(slide_names_list, key = lambda slide_name: int(re.search('(\d+)', slide_name).group(0)))
+
+        # Retrieve all raw XML contents of slides
+        slide_content_list = [unzipped_content.open(slide_name).read() for slide_name in slide_names_list_sorted]
+
+        # Retrieve all text content of slides within <a:t> tags
+        slide_text_list = [re.findall('<a:t>(.*?)</a:t>', slide_content) for slide_content in slide_content_list]
+
+        def containsText(text):
+            '''Returns the matched text if "text" arg is matched by PATTERN, returns empty string otherwise
+               Color the matched text RED_BOLD'''
+            match = re.search(args.PATTERN if args.python_regexp else re.escape(args.PATTERN), text, flags = re.IGNORECASE if args.ignore_case else 0)
+            return text[:match.start()] + RED_BOLD + match.group(0) + RESET + text[match.end():] if match else ''
+
+        # Search all slides and store the slide number (converted to 1-based) with the relevant text snippet
+        slide_num_with_snippet = []
+        for slide_num in range(len(slide_text_list)):
+            for snippet_num in range(len(slide_text_list[slide_num])):
+                matched_text = containsText(slide_text_list[slide_num][snippet_num])
+                if matched_text:
+                    slide_num_with_snippet.append((MAGENTA + pptx_file + RESET, GREEN + str(slide_num + 1) + RESET, matched_text))
+               
+        # Print matching output
+        if slide_num_with_snippet:
+            sys.stdout.write('\n'.join([tup[0] + CYAN + ':' + tup[1] + CYAN + ':' + RESET + tup[2] for tup in slide_num_with_snippet]) + '\n')
+
